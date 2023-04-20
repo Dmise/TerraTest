@@ -9,7 +9,7 @@ namespace Terra
     /// 
     /// </summary>
     /// <typeparam name="T"></typeparam>
-    internal class DocumentQueue<T> : IDocumentsQueue, IDisposableS
+    internal class DocumentQueue<T> : IDocumentsQueue, IDisposable
     {
         // To detect redundant calls
         private bool _disposedValue;
