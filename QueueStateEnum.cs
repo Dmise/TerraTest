@@ -4,7 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace ConsoleApp2
+namespace Terra
 {
     internal enum QueueStateEnum
     {
@@ -15,6 +15,7 @@ namespace ConsoleApp2
         endSending,
         exception,
         bufferReady,
-        bufferOverflow
+        bufferOverflow,
+        warning
     }
 }

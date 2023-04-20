@@ -1,14 +1,6 @@
-﻿using ConsoleApp2;
-using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Linq;
-using System.Net.Mail;
+﻿using System.Collections.Concurrent;
 using System.Reflection.Metadata;
-using System.Text;
-using System.Threading.Tasks;
-using System.Xml.Linq;
+
 
 namespace Terra
 {
@@ -16,18 +8,18 @@ namespace Terra
     /// 
     /// </summary>
     /// <typeparam name="T"></typeparam>
-    internal class DocumentQueue<T> : IDocumentsQueue, IAsyncDisposable , IDisposable
+    internal class DocumentQueue<T> : IDocumentsQueue, IDisposable
     {
         // To detect redundant calls
         private bool _disposedValue;
 
         private ExternalSystemConnector _connector = new ExternalSystemConnector();        
-        private ConcurrentQueue<Document> _docs = new ConcurrentQueue<Document>();
+        private ConcurrentQueue<Document> _docs = new ConcurrentQueue<Document>();  
         private ConcurrentBag<Document> _docBuffer = new ConcurrentBag<Document>();
-        private ProgressReportFactory<T> _reportFactory;
-        private IProgress<T> _progress;
+        private IProgress<string> _progress;
         private Timer _timer;
         private CancellationToken _ct;
+        private bool _process = false;
 
         public ConcurrentQueue<Document> DocumentsInQueue
         {
@@ -37,105 +29,98 @@ namespace Terra
             }
         }
 
-        public DocumentQueue(uint timerTimeInSeconds, IProgress<T> reporter, CancellationToken ct) 
+        public DocumentQueue(uint timerTimeInSeconds, IProgress<string> reporter, CancellationToken ct) 
         {
             _timer = new Timer(
                 callback: new TimerCallback(TimerTask),
                 null,
                 TimeSpan.FromSeconds(timerTimeInSeconds),
                 TimeSpan.FromSeconds(timerTimeInSeconds));
-            _progress = reporter;
-            _reportFactory = new ProgressReportFactory<T>();
+            _progress = reporter;          
             _ct = ct;
 
         }
        
         public void Enqueue(Document document)
-        {
-            try
-            {               
-                _docs.Enqueue(document);               
-            }
-            catch(Exception ex) 
-            {
-                throw ex;
-            }                       
+        {                         
+            _docs.Enqueue(document);                                                           
         }
 
         private async void TimerTask(object? timerState)
         {
             try
             {
-                _ct.ThrowIfCancellationRequested();
-                // report something
-                _progress.Report(_reportFactory.Report(QueueStateEnum.onTimer));
-                // fill buffer 
-                if (!_docBuffer.IsEmpty || !_docs.IsEmpty)
-                {
-                    var freeInBuffer = _connector.PkgSize - _docBuffer.Count;
-                    var amountToTake = freeInBuffer > _docs.Count ? _docs.Count : freeInBuffer;
-                    for (int i = 0; i < amountToTake; i++)
-                    {
-                        _docs.TryDequeue(out var document);
-                        _docBuffer.Add(document);
-                    }
-                    _progress.Report(_reportFactory.Report(QueueStateEnum.bufferReady));
-                    if (_docBuffer.Count > _connector.PkgSize)
-                    {
-                        throw new ArgumentException();
-                    }
-                    await SendDocs();
-                }
+                if (_process)
+                    return;
+                _process = true;
+                _ct.ThrowIfCancellationRequested();                
+                _progress.Report(ReportMessageStorage.MessageDictionary[QueueStateEnum.onTimer]);               
+                if (_docBuffer.Count < _connector.PkgSize && !_docs.IsEmpty)
+                    FillBuffer();
+                await SendDocs();
+                _process = false;
             }
             catch (OperationCanceledException oce)
             {
                 // return docs from buffer to queue
-                _progress.Report(_reportFactory.Report(QueueStateEnum.cancel));
+                _progress.Report(ReportMessageStorage.MessageDictionary[QueueStateEnum.cancel]);
+                _progress.Report(oce.Message);
                 RestoreQueue();
-                
-                return; // completing TimerTask
-            }
-            catch (ArgumentException)
-            {                
-                _progress.Report(_reportFactory.Report(QueueStateEnum.bufferOverflow));
-                var over = _docBuffer.Count - _connector.PkgSize;
-                for (int i = 0; i < over; i++)
-                {
-                    _docBuffer.TryTake(out var document);
-                    _docs.Enqueue(document);                   
-                }
-                await SendDocs();
-            }
+                _process = false;               
+            }           
             catch(Exception ex) 
             {
                 // process exception
-                Console.WriteLine(ex.Message);
+                _progress.Report(ReportMessageStorage.MessageDictionary[QueueStateEnum.exception]);
+                _progress.Report(ex.Message);
+                _process = false;              
             }
         }
-              
+         
+        private void FillBuffer()
+        {           
+            var freeInBuffer = _connector.PkgSize - _docBuffer.Count;
+            var amountToTake = freeInBuffer > _docs.Count ? _docs.Count : freeInBuffer;
+            for (int i = 0; i < amountToTake; i++)
+            {
+                _docs.TryDequeue(out var document);
+                _docBuffer.Add(document);
+            }
+            _progress.Report(ReportMessageStorage.MessageDictionary[QueueStateEnum.bufferReady]);                         
+        }
         private async Task SendDocs()
         {
             try
-            {
-                _progress.Report(_reportFactory.Report(QueueStateEnum.startSending));
-                await _connector.SendDocuments(_docBuffer, _ct);
-                _progress.Report(_reportFactory.Report(QueueStateEnum.endSending));
-                _ct.ThrowIfCancellationRequested();
-                                               
-                // clear buffer  if success
-                _docBuffer.Clear();
-            }
-            catch (OperationCanceledException oce)
-            {
-                _progress.Report(_reportFactory.Report(QueueStateEnum.cancel));
-                RestoreQueue();
-            }
+            {               
+                _progress.Report(ReportMessageStorage.MessageDictionary[QueueStateEnum.startSending]);
+                if (_docBuffer.Count > _connector.PkgSize)
+                {
+                    _progress.Report(ReportMessageStorage.MessageDictionary[QueueStateEnum.bufferOverflow]);
+                    _progress.Report(ReportMessageStorage.MessageDictionary[QueueStateEnum.warning]);
+                    var tempChunk = new List<Document>();
+                    while (tempChunk.Count < _connector.PkgSize)
+                    {
+                        _docBuffer.TryTake(out var document);
+                        tempChunk.Add(document);
+                    }
+                    await _connector.SendDocuments(tempChunk, _ct);
+                }
+                else
+                {
+                    await _connector.SendDocuments(_docBuffer, _ct);
+                    _ct.ThrowIfCancellationRequested();
+                    // clear buffer  if success
+                    _docBuffer.Clear();
+                }                
+                _progress.Report(ReportMessageStorage.MessageDictionary[QueueStateEnum.endSending]);               
+            }           
             catch (Exception ex)
             {
                 throw ex;
             }
 
         }
+
         private void RestoreQueue()
         {
             foreach (var document in _docBuffer)
@@ -143,16 +128,6 @@ namespace Terra
                 _docs.Enqueue(document);
             }
             _docBuffer.Clear();
-        }
-
-        /// <summary>
-        /// Stop SendDocument process
-        /// </summary>
-        /// <returns></returns>
-        public ValueTask DisposeAsync()
-        {
-            Task.Run(() => Dispose()).Wait();   
-            return ValueTask.CompletedTask;
         }
 
         public void Dispose()
