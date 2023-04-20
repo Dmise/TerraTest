@@ -1,4 +1,5 @@
 ﻿using System.Collections.Concurrent;
+using System.Net.WebSockets;
 using System.Reflection.Metadata;
 
 
@@ -8,7 +9,7 @@ namespace Terra
     /// 
     /// </summary>
     /// <typeparam name="T"></typeparam>
-    internal class DocumentQueue<T> : IDocumentsQueue, IDisposable
+    internal class DocumentQueue<T> : IDocumentsQueue, IDisposableS
     {
         // To detect redundant calls
         private bool _disposedValue;
@@ -16,10 +17,13 @@ namespace Terra
         private ExternalSystemConnector _connector = new ExternalSystemConnector();        
         private ConcurrentQueue<Document> _docs = new ConcurrentQueue<Document>();  
         private ConcurrentBag<Document> _docBuffer = new ConcurrentBag<Document>();
+        private ConcurrentBag<Document> _stuckDocs = new ConcurrentBag<Document>();
         private IProgress<string> _progress;
         private Timer _timer;
         private CancellationToken _ct;
         private bool _process = false;
+
+        public event Action<ConcurrentBag<Document>> OnSendError;
 
         public ConcurrentQueue<Document> DocumentsInQueue
         {
@@ -57,7 +61,7 @@ namespace Terra
                 _progress.Report(ReportMessageStorage.MessageDictionary[QueueStateEnum.onTimer]);               
                 if (_docBuffer.Count < _connector.PkgSize && !_docs.IsEmpty)
                     FillBuffer();
-                await SendDocs();
+                await SendDocs(_docBuffer);
                 _process = false;
             }
             catch (OperationCanceledException oce)
@@ -88,37 +92,48 @@ namespace Terra
             }
             _progress.Report(ReportMessageStorage.MessageDictionary[QueueStateEnum.bufferReady]);                         
         }
-        private async Task SendDocs()
+        private async Task SendDocs(ConcurrentBag<Document> docs)
         {
             try
-            {               
-                _progress.Report(ReportMessageStorage.MessageDictionary[QueueStateEnum.startSending]);
-                if (_docBuffer.Count > _connector.PkgSize)
+            {                          
+                await _connector.SendDocuments(docs, _ct);
+                _ct.ThrowIfCancellationRequested();
+                // clear buffer  if success
+                docs.Clear();
+                                             
+                _progress.Report(ReportMessageStorage.MessageDictionary[QueueStateEnum.endSending]);               
+            }  
+            catch (ArgumentException ae)
+            {
+                _progress.Report(ReportMessageStorage.MessageDictionary[QueueStateEnum.exception]);
+                _progress.Report(ae.Message);
+                if(_docBuffer.Count > _connector.PkgSize)
                 {
-                    _progress.Report(ReportMessageStorage.MessageDictionary[QueueStateEnum.bufferOverflow]);
-                    _progress.Report(ReportMessageStorage.MessageDictionary[QueueStateEnum.warning]);
-                    var tempChunk = new List<Document>();
-                    while (tempChunk.Count < _connector.PkgSize)
+                    var docList = new ConcurrentBag<Document>();
+                    while(_docBuffer.Count > _connector.PkgSize)
                     {
-                        _docBuffer.TryTake(out var document);
-                        tempChunk.Add(document);
+                        _docBuffer.TryTake(out var doc);
+                        docList.Add(doc);
                     }
-                    await _connector.SendDocuments(tempChunk, _ct);
+                    SendDocs(docList);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (OnSendError != null)
+                {
+                    OnSendError.Invoke(docs);
+                    docs.Clear();
                 }
                 else
                 {
-                    await _connector.SendDocuments(_docBuffer, _ct);
-                    _ct.ThrowIfCancellationRequested();
-                    // clear buffer  if success
-                    _docBuffer.Clear();
-                }                
-                _progress.Report(ReportMessageStorage.MessageDictionary[QueueStateEnum.endSending]);               
-            }           
-            catch (Exception ex)
-            {
-                throw ex;
+                    while (docs.Count > 0)
+                    {
+                        docs.TryTake(out var stackDock);
+                        _stuckDocs.Add(stackDock);
+                    }
+                }
             }
-
         }
 
         private void RestoreQueue()

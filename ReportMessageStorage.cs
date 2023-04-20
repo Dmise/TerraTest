@@ -16,7 +16,7 @@ namespace Terra
             new KeyValuePair<QueueStateEnum, string>(QueueStateEnum.bufferReady, "BufferReady"),
             new KeyValuePair<QueueStateEnum, string>(QueueStateEnum.endSending, "End sending documents"),
             new KeyValuePair<QueueStateEnum, string>(QueueStateEnum.startSending, "Start sending documents"),
-            new KeyValuePair<QueueStateEnum, string>(QueueStateEnum.cancel, "Cancel"),
+            new KeyValuePair<QueueStateEnum, string>(QueueStateEnum.cancel, "Cancel sending messages"),
             new KeyValuePair<QueueStateEnum, string>(QueueStateEnum.onTimer, "Time process activated"),
             new KeyValuePair<QueueStateEnum, string>(QueueStateEnum.bufferOverflow, "Buffer overflow we gather more message than connector can send by one time."),
             new KeyValuePair<QueueStateEnum, string>(QueueStateEnum.exception, "An exception occurred during document sending process."),
